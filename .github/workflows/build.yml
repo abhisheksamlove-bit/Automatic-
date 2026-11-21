@@ -5,10 +5,387 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Project files banao
+        run: |
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+              plugins {
+                  id("com.android.application") version "8.5.2"
+                  id("org.jetbrains.kotlin.android") version "1.9.24"
+              }
+          }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "AutoPlayer"
+          include(":app")
+          EOF
+          mkdir -p $(dirname gradle.properties)
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          EOF
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.example.autoplayer"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.example.autoplayer"; minSdk = 30; targetSdk = 34; versionCode = 3; versionName = "3.0" }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <queries>
+                  <intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent>
+              </queries>
+              <application android:label="Auto Player" android:icon="@drawable/ic_launcher" android:roundIcon="@drawable/ic_launcher" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".AutoPlayService" android:exported="false"
+                      android:label="Auto Player" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
+                      <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_config"/>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p $(dirname app/src/main/res/xml/accessibility_config.xml)
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRequestFilterKeyEvents"
+              android:canRequestFilterKeyEvents="true"
+              android:canPerformGestures="true"
+              android:canTakeScreenshot="true"
+              android:description="@string/svc_desc"/>
+          EOF
+          mkdir -p $(dirname app/src/main/res/values/strings.xml)
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="svc_desc">Game ke liye screen dekhta hai aur tap karta hai</string>
+          </resources>
+          EOF
+          mkdir -p $(dirname app/src/main/res/drawable/ic_launcher.xml)
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#6D4AFF" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M35,38H73A14,14 0 0 1 87,52V58A14,14 0 0 1 73,72H70L64,64H44L38,72H35A14,14 0 0 1 21,58V52A14,14 0 0 1 35,38Z"/>
+              <path android:fillColor="#6D4AFF" android:pathData="M32,50h4v-4h4v4h4v4h-4v4h-4v-4h-4z"/>
+              <path android:fillColor="#FFC83D" android:pathData="M64.5,50a3.5,3.5 0 1 0 7,0a3.5,3.5 0 1 0 -7,0z"/>
+              <path android:fillColor="#FF5A5F" android:pathData="M71.5,57a3.5,3.5 0 1 0 7,0a3.5,3.5 0 1 0 -7,0z"/>
+          </vector>
+          EOF
+          mkdir -p $(dirname app/src/main/java/com/example/autoplayer/AutoPlayService.kt)
+          cat > app/src/main/java/com/example/autoplayer/AutoPlayService.kt <<'EOF'
+          package com.example.autoplayer
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Bitmap
+          import android.graphics.Path
+          import android.view.Display
+          import android.view.KeyEvent
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+          import java.util.concurrent.CountDownLatch
+          import java.util.concurrent.Executors
+          import java.util.concurrent.TimeUnit
+
+          class AutoPlayService : AccessibilityService() {
+              companion object {
+                  var instance: AutoPlayService? = null
+                  @Volatile var running = false
+                  var targetPackage = ""
+                  const val MAX_STEPS = 3000
+                  val GOOD = setOf("play", "start", "next", "continue", "ok", "skip", "claim", "retry", "resume",
+                      "collect", "got it", "close", "accept", "tap to play", "tap to start", "tap to continue",
+                      "continue game", "next level", "start game", "play again")
+              }
+
+              private val rnd = java.util.Random()
+
+              override fun onServiceConnected() { instance = this }
+              override fun onAccessibilityEvent(e: AccessibilityEvent?) {}
+              override fun onInterrupt() { running = false }
+              override fun onKeyEvent(event: KeyEvent): Boolean {
+                  if (running && event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN && event.action == KeyEvent.ACTION_DOWN) {
+                      running = false
+                      return true
+                  }
+                  return false
+              }
+              override fun onDestroy() { running = false; instance = null; super.onDestroy() }
+
+              fun startPlaying() {
+                  if (running) return
+                  running = true
+                  Thread { loop() }.start()
+              }
+
+              private fun loop() {
+                  val cols = 8
+                  val rows = 16
+                  val score = DoubleArray(cols * rows) { 1.0 }
+                  var prev: IntArray? = null
+                  var lastCell = -1
+                  var steps = 0
+                  var away = 0
+                  while (running && steps < MAX_STEPS) {
+                      try {
+                          val pkg = rootInActiveWindow?.packageName?.toString()
+                          if (pkg != null && targetPackage.isNotEmpty() && pkg != targetPackage && pkg != "com.android.systemui") {
+                              away++
+                              if (away >= 8) { running = false; break }
+                              performGlobalAction(GLOBAL_ACTION_BACK)
+                              Thread.sleep(1200)
+                              continue
+                          }
+                          away = 0
+                          if (clickKnownButton()) { steps++; lastCell = -1; Thread.sleep(900); continue }
+                          val shot = screenshot()
+                          if (shot == null) { Thread.sleep(800); continue }
+                          val small = Bitmap.createScaledBitmap(shot, 64, 128, true)
+                          val px = IntArray(64 * 128)
+                          small.getPixels(px, 0, 64, 0, 0, 64, 128)
+                          val old = prev
+                          if (old != null && lastCell >= 0) {
+                              val r = diff(old, px)
+                              score[lastCell] = (score[lastCell] * 0.6 + (r * 20.0 + 0.2) * 0.4).coerceIn(0.2, 5.0)
+                          }
+                          prev = px
+                          if (rnd.nextInt(100) < 12) {
+                              swipeRandom(shot.width, shot.height)
+                              lastCell = -1
+                          } else {
+                              val cell = pick(score, px, cols)
+                              lastCell = cell
+                              val cx = ((cell % cols) + 0.2 + rnd.nextDouble() * 0.6) / cols * shot.width
+                              val cy = ((cell / cols) + 0.2 + rnd.nextDouble() * 0.6) / rows * shot.height
+                              tap(cx, cy)
+                          }
+                          steps++
+                          Thread.sleep(600)
+                      } catch (t: Throwable) {
+                          Thread.sleep(1000)
+                      }
+                  }
+                  running = false
+              }
+
+              private fun pick(score: DoubleArray, px: IntArray, cols: Int): Int {
+                  val w = DoubleArray(score.size)
+                  var total = 0.0
+                  for (i in score.indices) {
+                      val x0 = (i % cols) * 8
+                      val y0 = (i / cols) * 8
+                      var sat = 0.0
+                      for (y in 0 until 8 step 2) {
+                          for (x in 0 until 8 step 2) {
+                              val c = px[(y0 + y) * 64 + x0 + x]
+                              val r = (c shr 16) and 255
+                              val g = (c shr 8) and 255
+                              val b = c and 255
+                              sat += (maxOf(r, g, b) - minOf(r, g, b)) / 255.0
+                          }
+                      }
+                      w[i] = score[i] * (0.15 + sat / 16.0)
+                      total += w[i]
+                  }
+                  var t = rnd.nextDouble() * total
+                  for (i in w.indices) {
+                      t -= w[i]
+                      if (t <= 0) return i
+                  }
+                  return w.size - 1
+              }
+
+              private fun diff(a: IntArray, b: IntArray): Double {
+                  var n = 0
+                  var i = 0
+                  while (i < a.size) {
+                      val x = a[i]
+                      val y = b[i]
+                      val d = Math.abs(((x shr 16) and 255) - ((y shr 16) and 255)) +
+                          Math.abs(((x shr 8) and 255) - ((y shr 8) and 255)) +
+                          Math.abs((x and 255) - (y and 255))
+                      if (d > 90) n++
+                      i += 4
+                  }
+                  return n.toDouble() / (a.size / 4)
+              }
+
+              private fun clickKnownButton(): Boolean {
+                  val root = rootInActiveWindow ?: return false
+                  val found = ArrayList<AccessibilityNodeInfo>()
+                  collect(root, found, 0)
+                  for (n in found) {
+                      if (n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                      var p = n.parent
+                      var depth = 0
+                      while (p != null && depth < 4) {
+                          if (p.isClickable && p.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                          p = p.parent
+                          depth++
+                      }
+                  }
+                  return false
+              }
+
+              private fun collect(n: AccessibilityNodeInfo?, out: MutableList<AccessibilityNodeInfo>, depth: Int) {
+                  if (n == null || depth > 25) return
+                  val t1 = n.text?.toString()?.trim()?.lowercase() ?: ""
+                  val t2 = n.contentDescription?.toString()?.trim()?.lowercase() ?: ""
+                  if (n.isVisibleToUser && (GOOD.contains(t1) || GOOD.contains(t2))) out.add(n)
+                  for (i in 0 until n.childCount) collect(n.getChild(i), out, depth + 1)
+              }
+
+              private fun screenshot(): Bitmap? {
+                  var result: Bitmap? = null
+                  val latch = CountDownLatch(1)
+                  takeScreenshot(Display.DEFAULT_DISPLAY, Executors.newSingleThreadExecutor(),
+                      object : AccessibilityService.TakeScreenshotCallback {
+                          override fun onSuccess(s: AccessibilityService.ScreenshotResult) {
+                              result = Bitmap.wrapHardwareBuffer(s.hardwareBuffer, s.colorSpace)
+                                  ?.copy(Bitmap.Config.ARGB_8888, false)
+                              s.hardwareBuffer.close()
+                              latch.countDown()
+                          }
+                          override fun onFailure(code: Int) { latch.countDown() }
+                      })
+                  latch.await(5, TimeUnit.SECONDS)
+                  return result
+              }
+
+              private fun swipeRandom(w: Int, h: Int) {
+                  val cx = w / 2.0
+                  val cy = h / 2.0
+                  val dx = w * 0.3
+                  val dy = h * 0.2
+                  when (rnd.nextInt(4)) {
+                      0 -> swipe(cx, cy, cx - dx, cy)
+                      1 -> swipe(cx, cy, cx + dx, cy)
+                      2 -> swipe(cx, cy, cx, cy - dy)
+                      else -> swipe(cx, cy, cx, cy + dy)
+                  }
+              }
+
+              private fun tap(x: Double, y: Double) {
+                  val p = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+                  dispatchGesture(GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(p, 0, 60)).build(), null, null)
+              }
+
+              private fun swipe(x1: Double, y1: Double, x2: Double, y2: Double) {
+                  val p = Path().apply { moveTo(x1.toFloat(), y1.toFloat()); lineTo(x2.toFloat(), y2.toFloat()) }
+                  dispatchGesture(GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(p, 0, 300)).build(), null, null)
+              }
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/java/com/example/autoplayer/MainActivity.kt)
+          cat > app/src/main/java/com/example/autoplayer/MainActivity.kt <<'EOF'
+          package com.example.autoplayer
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.ApplicationInfo
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.ArrayAdapter
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.ListView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+              private val ui = Handler(Looper.getMainLooper())
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val pm = packageManager
+                  val all = pm.queryIntentActivities(
+                      Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), PackageManager.MATCH_ALL)
+                      .filter { it.activityInfo.packageName != packageName }
+                  val games = all.filter {
+                      val ai = it.activityInfo.applicationInfo
+                      ai.category == ApplicationInfo.CATEGORY_GAME || (ai.flags and ApplicationInfo.FLAG_IS_GAME) != 0
+                  }
+                  val apps = (if (games.isEmpty()) all else games).sortedBy { it.loadLabel(pm).toString().lowercase() }
+                  val names = apps.map { it.loadLabel(pm).toString() }
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setBackgroundColor(Color.parseColor("#1B1530"))
+                  root.setPadding(32, 96, 32, 16)
+
+                  val logo = ImageView(this)
+                  logo.setImageResource(R.drawable.ic_launcher)
+                  root.addView(logo, LinearLayout.LayoutParams(220, 220).apply { gravity = Gravity.CENTER_HORIZONTAL })
+
+                  val title = TextView(this)
+                  title.text = "Auto Player"
+                  title.textSize = 30f
+                  title.setTextColor(Color.WHITE)
+                  title.gravity = Gravity.CENTER
+                  title.setPadding(0, 24, 0, 40)
+                  root.addView(title)
+
+                  val listAdapter = object : ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, names) {
+                      override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                          val v = super.getView(position, convertView, parent) as TextView
+                          v.setTextColor(Color.WHITE)
+                          v.textSize = 20f
+                          v.setPadding(24, 36, 24, 36)
+                          return v
+                      }
+                  }
+                  val list = ListView(this)
+                  list.divider = null
+                  list.adapter = listAdapter
+                  list.setOnItemClickListener { _, _, i, _ ->
+                      val svc = AutoPlayService.instance
+                      if (svc == null) {
+                          Toast.makeText(this, "Auto Player ko ON karo, phir game dobara chuno", Toast.LENGTH_LONG).show()
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      } else {
+                          AutoPlayService.targetPackage = apps[i].activityInfo.packageName
+                          pm.getLaunchIntentForPackage(apps[i].activityInfo.packageName)?.let { startActivity(it) }
+                          ui.postDelayed({ svc.startPlaying() }, 3000)
+                      }
+                  }
+                  root.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
+                  setContentView(root)
+              }
+          }
+          EOF
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
+        with:
+          distribution: temurin
+          java-version: 17
       - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: 8.7 }
+        with:
+          gradle-version: 8.7
       - run: gradle assembleDebug
       - uses: actions/upload-artifact@v4
         with:
